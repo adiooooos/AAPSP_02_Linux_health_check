@@ -1,0 +1,6 @@
+{# templates/machine_report.j2 #}
+{% for host in ansible_play_hosts_all %}
+=== Host: {{ hostvars[host].inventory_hostname }} ===
+{{ hostvars[host].chkdata.stdout }}
+{% if not loop.last %}\n{% endif %}
+{% endfor %}
