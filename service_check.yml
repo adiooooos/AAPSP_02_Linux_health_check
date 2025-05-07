@@ -1,0 +1,73 @@
+---
+- name: Check services on Linux hosts
+  hosts: rhel7
+  vars:
+    services_list: "crond sshd httpd vsftpd"
+    svc_store_file: "/tmp/svc-check.txt"
+    store_host: "ansible25.example.com"
+
+  tasks:
+    - name: Check services status
+      ansible.builtin.shell: |
+        failed_services=""
+        for service in {{ services_list }}; do
+          if ! systemctl is-active $service; then
+            failed_services+="$service "  # Record only failed service names
+          fi
+        done
+        echo "$failed_services" > /tmp/failed_services.txt
+      args:
+        executable: /bin/bash
+      register: service_check
+      # Ignore command return code (continue tasks even if services are not running)
+      failed_when: false
+
+    - name: Extract failed service names from the file
+      ansible.builtin.slurp:
+        src: /tmp/failed_services.txt
+      register: failed_services_slurp
+      changed_when: false
+
+    - name: Cleanup temp file on target hosts
+      ansible.builtin.file:
+        path: /tmp/failed_services.txt
+        state: absent
+
+    - name: Convert raw data to list
+      ansible.builtin.set_fact:
+        failed_services: "{{ (failed_services_slurp.content | b64decode).split() | unique }}"
+      when: failed_services_slurp.content | length > 0
+
+    - name: Initialize per-host result list
+      ansible.builtin.set_fact:
+        host_result: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "failed_services": "{{ failed_services | default([]) }}"
+          }
+
+    - name: Clean old local file
+      ansible.builtin.file:
+        path: "{{ svc_store_file }}"
+        state: absent
+      delegate_to: localhost
+      run_once: yes
+
+    - name: Aggregate results to local file (atomic write)
+      ansible.builtin.copy:
+        content: |
+          {% for host in ansible_play_hosts %}
+          {{ hostvars[host].host_result | to_nice_yaml | indent(2) }}
+          {% endfor %}
+        dest: "{{ svc_store_file }}"
+        force: yes  # Force overwrite to ensure content merging
+      delegate_to: localhost
+      run_once: yes  # Prevent race conditions, single task execution
+
+    - name: Copy aggregated file to store host
+      ansible.builtin.copy:
+        src: "{{ svc_store_file }}"
+        dest: "{{ svc_store_file }}"
+      delegate_to: "{{ store_host }}"
+      run_once: yes
+      when: store_host is defined
