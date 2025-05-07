@@ -1,0 +1,73 @@
+---
+# Rev1.1 Stable version optimized based on best practices
+- name: Collect RHEL system health info with secure centralized logging
+  hosts: rhel7
+  vars:
+    health_store_dir: "/tmp/audit_logs"          # Standard centralized storage path (non-business directory)
+    health_store_file: "{{ health_store_dir }}/health-check-{{ ansible_date_time.date }}.log"  # Archive by date
+    store_host: "ansible25.example.com"
+    # Optional encryption configuration (can be enabled for future extensions)
+    # encrypt_file: yes
+    # gpg_key_id: "SRE_OpsKey_2023"
+
+  tasks:
+    #--------------------------
+    # Information Collection Section (Enhanced Permission Control)
+    #--------------------------
+    - name: Collect critical system health metrics (with sudo)
+      ansible.builtin.shell: |
+        echo "[System Reboot History]"
+        last reboot | head -3  # Last 3 reboots
+        echo -e "\n[Critical Logs Today]"
+        journalctl -S today -p err..emerg --merge --no-pager --utc  # UTC time to avoid timezone confusion
+        echo -e "\n[High Disk Usage (>80%)]"
+        df -hT -x tmpfs -x devtmpfs | awk 'NR>1 {gsub(/%/,""); if ($6 > 80) print $0}'
+        echo -e "\n[Zombie Processes Check]"
+        ps -ef | grep 'defunct' | grep -v grep || echo "No zombies found"
+      register: healthdata
+      become: yes  # Enforce privilege escalation to ensure execution permissions for journalctl, etc.
+      changed_when: false  # Pure information collection, does not trigger changed status
+      tags: collect
+
+    # Key Point: Explicitly synchronize variables to the control node
+    - name: Propagate directory path to controller (global variable tagging)
+      ansible.builtin.set_fact:
+        global_report_base: "{{ health_store_dir }}"
+        global_store_host: "{{ store_host }}"
+      run_once: yes
+      delegate_to: localhost
+      tags: always
+
+# Phase2 - Report Generation Section (Independent Play)
+- name: Generate consolidated report on Ansible Controller
+  hosts: localhost  # Enforce execution on the control node
+  vars:
+    # Inherit variables (with comments indicating source)
+    health_store_dir: "{{ global_report_base | default('/tmp/audit_logs_fallback') }}"  # Clear fallback path
+    health_store_file: "{{ health_store_dir }}/health-check-{{ ansible_date_time.date }}.log"
+    store_host: "{{ global_store_host | omit if not defined }}"  # Prevent errors from undefined variables
+  tasks:
+    - name: Validate directory structure
+      ansible.builtin.file:
+        path: "{{ health_store_dir }}"
+        state: directory
+        mode: 0700
+        owner: "{{ ansible_user_id }}"
+      tags: setup
+    
+    - name: Generate master report via templates
+      ansible.builtin.template:
+        src: health_report.j2
+        dest: "{{ health_store_file }}"
+        mode: 0640
+      vars:
+        healthdata_collection: |
+          {% for host in groups['rhel7'] %}
+          {% if hostvars[host].healthdata is defined %}
+          ### Host: {{ host }} ###
+          {{ hostvars[host].healthdata.stdout | replace('\n', '\\n') | replace('\\', '\\\\') | replace('"', '\\"') | indent(2) }}
+          {% else %}
+          ### Host: {{ host }} (No Data Collected) ###
+          {% endif %}
+          {% endfor %}
+      tags: report
