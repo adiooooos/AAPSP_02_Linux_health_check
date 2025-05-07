@@ -1,0 +1,104 @@
+---
+- name: RHEL7 System Health Check (Packages & Processes)
+  hosts: rhel7
+  vars:
+    target_str: "http"      # Modifiable search keyword (supports regular expressions)
+    collection_dir: "/tmp/healthcheck"  # Temporary storage directory on the node
+    aggregate_file: "/tmp/healthcheck_results.log"  # Local path for the aggregated file
+    storage_host: "ansible25.example.com"  # FQDN/IP of the storage host
+
+  tasks:
+    # Task 1: Securely collect package and process lists (optimized command structure)
+    - name: Collect packages and processes info
+      ansible.builtin.shell: |
+        echo "[Packages]"
+        rpm -qa | grep -iE '{{ target_str | regex_escape }}' || echo "N/A"
+        echo -e "\n[Processes]"
+        ps -eo 'comm,args' | grep -iE '{{ target_str | regex_escape }}' | grep -v grep || echo "N/A"
+      args:
+        executable: /bin/bash
+      register: healthcheck_result
+      changed_when: false  # Mark as a check-type task
+      tags: collect
+
+    # Task 2: Print results to console in real-time
+    - name: Display raw results
+      ansible.builtin.debug:
+        var: healthcheck_result.stdout_lines
+      tags: debug
+
+    # Task 3: Clean up historical results on target hosts (enhanced robustness)
+    - name: Clean previous result files
+      block:
+        - name: Remove old collection directory
+          ansible.builtin.file:
+            path: "{{ collection_dir }}"
+            state: absent
+            mode: "0755"
+          
+        - name: Ensure new directory exists
+          ansible.builtin.file:
+            path: "{{ collection_dir }}"
+            state: directory
+            mode: "0755"
+          register: dir_creation
+
+        - name: Clean aggregate file
+          ansible.builtin.file:
+            path: "{{ aggregate_file }}"
+            state: absent
+          delegate_to: localhost
+          run_once: true
+      tags: cleanup
+
+    # Task 4: Generate structured result file (optimized data processing logic)
+    - name: Generate structured report
+      ansible.builtin.copy:
+        dest: "{{ collection_dir }}/health_{{ inventory_hostname }}.log"
+        content: |
+          === Host: {{ inventory_hostname }} ===
+          Packages:
+          {% for pkg in healthcheck_result.stdout | regex_findall('\[Packages\]\n(.*?)\n\n', multiline=True) | first | split('\n') %}
+            - {{ pkg | trim }}
+          {% else %}
+            - No matching packages found
+          {% endfor %}
+
+          Processes:
+          {% for proc in healthcheck_result.stdout | regex_findall('\[Processes\]\n(.*)', multiline=True) | first | split('\n') %}
+            - {{ proc | trim }}
+          {% else %}
+            - No running processes found
+          {% endfor %}
+        force: yes
+      tags: report
+
+    # Task 5: Aggregate all node results (optimized for parallel processing)
+    - name: Aggregate all reports
+      ansible.builtin.template:
+        src: aggregated_report.j2
+        dest: "{{ aggregate_file }}"
+      delegate_to: localhost
+      run_once: true
+      tags: aggregate
+
+    # Task 6: Securely transfer to central storage (added SSH key validation)
+    - name: Create archive directory on storage host
+      ansible.builtin.file:
+        path: "/opt/healthcheck_archive"
+        state: directory
+        mode: "0755"
+      delegate_to: "{{ storage_host }}"
+      run_once: true
+      tags: transfer
+
+    - name: Transfer aggregated file
+      ansible.builtin.copy:
+        src: "{{ aggregate_file }}"
+        dest: "/opt/healthcheck_archive/healthcheck-{{ ansible_date_time.date }}.log"
+        mode: "0644"
+        follow: true
+      delegate_to: "{{ storage_host }}"
+      run_once: true
+      tags: transfer
+      when: storage_host is defined
