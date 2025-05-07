@@ -1,0 +1,9 @@
+{# aggregated_report.j2 #}
+{% for host in ansible_play_hosts_all %}
+=== Host: {{ host }} ===
+Packages:
+{{ hostvars[host].healthcheck_result.stdout | regex_search('\[Packages\]\n(.*?)\n\n', multiline=True, groups=1) | replace('\n', '\n  - ') | default('  - No packages found') }}
+
+Processes:
+{{ hostvars[host].healthcheck_result.stdout | regex_search('\[Processes\]\n(.*)', multiline=True, groups=1) | replace('\n', '\n  - ') | default('  - No processes found') }}
+{% endfor %}
