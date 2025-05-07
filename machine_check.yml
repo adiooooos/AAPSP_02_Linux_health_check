@@ -1,0 +1,70 @@
+---
+- name: Collect RHEL machine info with robustness
+  hosts: rhel7
+  vars:
+    machine_store_file: "/tmp/machine-check.txt"
+    store_host: "ansible25.example.com"
+    remote_store_dir: "/opt/machine_info"
+
+  tasks:
+    # Task 1: Collect machine information (unchanged)
+    - name: Gather machine hardware and OS details
+      ansible.builtin.shell: |
+        echo "Hostname=$(hostname), CPU_Cores=$(nproc), Total_RAM=$(free -h | awk '/Mem:/{print $2}')"
+        echo "Manufacturer=$(sudo dmidecode -t baseboard | awk -F': ' '/Manufacturer/{print $2}')"
+        echo "Product=$(sudo dmidecode -t baseboard | awk -F': ' '/Product Name/{print $2}')"
+        echo "OS=$(cat /etc/redhat-release), Kernel=$(uname -r)"
+        echo "Storage Devices:" 
+        lsblk -do NAME,TYPE,SIZE,MODEL | awk '!/loop|dm/ && $2=="disk"' 
+        echo "Network Interfaces:"
+        nmcli -t d | awk -F: '/ethernet/ {printf "%-10s %s\n", $1, $5}'
+      register: chkdata
+      args:
+        executable: /bin/bash
+      become: yes
+
+    # Task 2: Clean up old aggregated file (unchanged)
+    - name: Remove old aggregated file
+      ansible.builtin.file:
+        path: "{{ machine_store_file }}"
+        state: absent
+      delegate_to: localhost
+      run_once: yes
+      tags: cleanup
+
+    # Task 3: Generate aggregated report (unchanged)
+    - name: Generate aggregated report
+      ansible.builtin.template:
+        src: machine_report.j2
+        dest: "{{ machine_store_file }}"
+      delegate_to: localhost
+      run_once: yes
+      tags: report
+
+    # Task 4: Create remote directory (merged Task4 and Task5)
+    - name: Ensure remote archive directory exists
+      ansible.builtin.file:
+        path: "{{ remote_store_dir }}"  # Use variable to avoid hardcoding
+        state: directory
+        mode: "0755"
+        owner: "root"
+        group: "root"
+      delegate_to: "{{ store_host }}"
+      become: yes                      # Critical! Privilege escalation
+      run_once: true
+      tags: transfer
+      when: store_host is defined      # Unified condition check
+
+    # Task 5: Transfer file (optimized)
+    - name: Transfer machine info file to storage host
+      ansible.builtin.copy:
+        src: "{{ machine_store_file }}"
+        dest: "{{ remote_store_dir }}/machine-check-{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.log"
+        mode: "0644"
+        remote_src: no
+        follow: yes
+        validate: 'ls %s'
+      delegate_to: "{{ store_host }}"
+      run_once: true
+      tags: transfer
+      when: store_host is defined
